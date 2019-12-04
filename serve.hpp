@@ -61,6 +61,7 @@ class Serve{
         }
 
     public:
+        //线程处理函数,对HTTP的请求进行解析
         static void HttpHandler(int sockfd){
             TcpSocket clisock;
             clisock.Setfd(sockfd);
@@ -88,12 +89,12 @@ class Serve{
                 rsp._status=404;
                 return false;
             }
-            cout<<"--------------"<<endl;
-            cout<<"real_path["<<real_path<<"]"<<endl;
-            cout<<"method["<<req._method<<"]"<<endl;
             if((req._method=="GET"&&req._param.size()!=0)||req._method=="POST"){
                 //当前请求是一个文件上传请求
                 CGIprocess(req,rsp);
+                    for(auto& i:req._headers){
+                        cout<<"["<<i.first<<"]"<<"--"<<"["<<i.second<<"]"<<endl;
+                    }
             }else{
                 //当前的请求是一个文件下载或者文件列表展示的请求       
                 if(boost::filesystem::is_directory(real_path)){
@@ -102,8 +103,10 @@ class Serve{
                     rsp.SetKeyandVal("Content_Type","text/html");
                 }else{
                     //文件下载请求
-                    Download(real_path,rsp._body);
-                    rsp.SetKeyandVal("Content-Type","application/octet-stream");
+                    RangeDownload(req,rsp);
+                    for(auto& i:rsp._headers){
+                        cout<<"["<<i.first<<"]"<<"--"<<"["<<i.second<<"]"<<endl;
+                    }
                 }
             }
             rsp._status=200;
@@ -155,14 +158,63 @@ class Serve{
             close(pipe_out[1]);
             return true;
         }
-        static bool Download(string &path,string &body){
-            int64_t fsize=boost::filesystem::file_size(path);
-            body.resize(fsize);
-            ifstream file(path);
+        static bool RangeDownload(HttpRequest& req,HttpResponse& rsp){
+            string real_path=WWW_ROOT+req._path;
+            int64_t fsize=boost::filesystem::file_size(real_path);   
+            int64_t last_time=boost::filesystem::last_write_time(real_path); 
+            string etag=to_string(fsize)+to_string(last_time);
+            //判断请求中是否存在Range.
+            auto it=req._headers.find("Range");
+            if(it==req._headers.end()){
+                Download(req._path,0,fsize,rsp._body);
+                rsp._status=200;
+            }else{
+                string bytes="bytes=";
+                string range=it->second;
+                size_t pos1=range.find(bytes);
+                if(pos1==string::npos){
+                    return false;
+                }
+                pos1+=bytes.size();
+                size_t pos2=range.find("-",pos1);
+                if(pos2==string::npos){
+                    return false;
+                }
+                string start=range.substr(pos1,pos2-pos1);
+                string end=range.substr(pos2+1);
+                int64_t _start=0;
+                int64_t _end=0;
+                stringstream tmp;
+                tmp<<start;
+                tmp>>_start;
+                tmp.clear();
+                if(end.size()==0){
+                    _end=fsize-1;
+                }else{
+                    tmp<<end;
+                    tmp>>_end;
+                }
+                int64_t range_len=_end-_start+1;
+                Download(req._path,_start,range_len,rsp._body);
+                tmp << "bytes " << _start << "-" << _end << "/" << fsize;
+                rsp.SetKeyandVal("Content-Range",tmp.str());
+                rsp._status=206;
+            }
+            rsp.SetKeyandVal("Content-Type","application/octet-stream");
+            rsp.SetKeyandVal("Accept-Ranges","bytes");
+            rsp.SetKeyandVal("Etag",etag);
+            return true;
+        }
+
+        static bool Download(string& _path,int64_t start,int64_t fsize,string& _body){
+            _body.resize(fsize);
+            ifstream file(_path);
             if(!file.is_open()){
                 return false;
             }
-            file.read(&body[0],fsize);
+            //将文件的输入位置移动到输入的位置
+            file.seekg(start,ios::beg);
+            file.read(&_body[0],fsize);
             if(!file.good()){
                 return false;
             }
